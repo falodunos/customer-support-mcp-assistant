@@ -5,6 +5,7 @@ from openai import OpenAI
 from app.config import AppConfig
 from app.domain.models import AvailableTool, ToolPlan
 from app.infrastructure.logging_config import get_logger
+from app.infrastructure.tracing_config import app_generation_span
 
 
 class ToolPlanner:
@@ -72,30 +73,38 @@ class ToolPlanner:
 
         JSON response format:
         {{
-        "reasoning": "brief reason for selected tools or escalation",
-        "tool_calls": [
+          "reasoning": "brief reason for selected tools or escalation",
+          "tool_calls": [
             {{
-            "tool_name": "exact_tool_name",
-            "arguments": {{
+              "tool_name": "exact_tool_name",
+              "arguments": {{
                 "order_id": "ORD-1001"
+              }}
             }}
-            }}
-        ]
+          ]
         }}
         """
 
         try:
-            response = self.llm_client.chat.completions.create(
+            with app_generation_span(
                 model=AppConfig.OPENAI_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You select MCP tools and return valid JSON only.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0,
-            )
+                operation="tool_planning",
+                input_summary=(
+                    f"available_tool_count={len(available_tools)}; "
+                    f"question_length={len(question)}"
+                ),
+            ):
+                response = self.llm_client.chat.completions.create(
+                    model=AppConfig.OPENAI_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You select MCP tools and return valid JSON only.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0,
+                )
 
             content = response.choices[0].message.content or "{}"
             data = json.loads(content)

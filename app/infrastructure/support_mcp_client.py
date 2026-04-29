@@ -5,6 +5,7 @@ from mcp.client.stdio import stdio_client
 
 from app.domain.models import AvailableTool, PlannedToolCall, ToolResult
 from app.infrastructure.logging_config import get_logger
+from app.infrastructure.tracing_config import app_function_span
 
 
 class SupportMcpClient:
@@ -23,33 +24,37 @@ class SupportMcpClient:
 
         logger.info("mcp_tool_discovery_started")
 
-        try:
-            async with stdio_client(self._server_params()) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
+        with app_function_span(
+            name="mcp.list_available_tools",
+            input_summary=f"request_id={request_id}",
+        ):
+            try:
+                async with stdio_client(self._server_params()) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
 
-                    result = await session.list_tools()
+                        result = await session.list_tools()
 
-                    tools = [
-                        AvailableTool(
-                            name=tool.name,
-                            description=tool.description,
-                            input_schema=tool.inputSchema or {},
+                        tools = [
+                            AvailableTool(
+                                name=tool.name,
+                                description=tool.description,
+                                input_schema=tool.inputSchema or {},
+                            )
+                            for tool in result.tools
+                        ]
+
+                        logger.info(
+                            "mcp_tool_discovery_completed tool_count=%s tool_names=%s",
+                            len(tools),
+                            [tool.name for tool in tools],
                         )
-                        for tool in result.tools
-                    ]
 
-                    logger.info(
-                        "mcp_tool_discovery_completed tool_count=%s tool_names=%s",
-                        len(tools),
-                        [tool.name for tool in tools],
-                    )
+                        return tools
 
-                    return tools
-
-        except Exception:
-            logger.exception("mcp_tool_discovery_failed")
-            raise
+            except Exception:
+                logger.exception("mcp_tool_discovery_failed")
+                raise
 
     async def execute_tool(
         self,
@@ -62,50 +67,54 @@ class SupportMcpClient:
 
         safe_argument_keys = list(arguments.keys())
 
-        if tool_name not in allowed_tool_names:
-            logger.warning(
-                "mcp_tool_blocked_unknown_tool tool_name=%s argument_keys=%s",
+        with app_function_span(
+            name=f"mcp.execute_tool.{tool_name}",
+            input_summary=f"tool_name={tool_name}; argument_keys={safe_argument_keys}",
+        ):
+            if tool_name not in allowed_tool_names:
+                logger.warning(
+                    "mcp_tool_blocked_unknown_tool tool_name=%s argument_keys=%s",
+                    tool_name,
+                    safe_argument_keys,
+                )
+
+                return ToolResult(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result="Tool was not found on the MCP server.",
+                )
+
+            logger.info(
+                "mcp_tool_execution_started tool_name=%s argument_keys=%s",
                 tool_name,
                 safe_argument_keys,
             )
 
-            return ToolResult(
-                tool_name=tool_name,
-                arguments=arguments,
-                result="Tool was not found on the MCP server.",
-            )
+            try:
+                async with stdio_client(self._server_params()) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
 
-        logger.info(
-            "mcp_tool_execution_started tool_name=%s argument_keys=%s",
-            tool_name,
-            safe_argument_keys,
-        )
+                        result = await session.call_tool(tool_name, arguments)
 
-        try:
-            async with stdio_client(self._server_params()) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
+                        logger.info(
+                            "mcp_tool_execution_completed tool_name=%s",
+                            tool_name,
+                        )
 
-                    result = await session.call_tool(tool_name, arguments)
+                        return ToolResult(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            result=str(result.content),
+                        )
 
-                    logger.info(
-                        "mcp_tool_execution_completed tool_name=%s",
-                        tool_name,
-                    )
-
-                    return ToolResult(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        result=str(result.content),
-                    )
-
-        except Exception:
-            logger.exception(
-                "mcp_tool_execution_failed tool_name=%s argument_keys=%s",
-                tool_name,
-                safe_argument_keys,
-            )
-            raise
+            except Exception:
+                logger.exception(
+                    "mcp_tool_execution_failed tool_name=%s argument_keys=%s",
+                    tool_name,
+                    safe_argument_keys,
+                )
+                raise
 
     async def execute_tool_plan(
         self,
@@ -120,66 +129,80 @@ class SupportMcpClient:
             [tool_call.tool_name for tool_call in tool_calls],
         )
 
-        try:
-            async with stdio_client(self._server_params()) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
+        with app_function_span(
+            name="mcp.execute_tool_plan",
+            input_summary=(
+                f"tool_call_count={len(tool_calls)}; "
+                f"selected_tools={[tool_call.tool_name for tool_call in tool_calls]}"
+            ),
+        ):
+            try:
+                async with stdio_client(self._server_params()) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
 
-                    available_tools = await session.list_tools()
-                    allowed_tool_names = {tool.name for tool in available_tools.tools}
+                        available_tools = await session.list_tools()
+                        allowed_tool_names = {tool.name for tool in available_tools.tools}
 
-                    results: list[ToolResult] = []
+                        results: list[ToolResult] = []
 
-                    for tool_call in tool_calls:
-                        safe_argument_keys = list(tool_call.arguments.keys())
+                        for tool_call in tool_calls:
+                            safe_argument_keys = list(tool_call.arguments.keys())
 
-                        if tool_call.tool_name not in allowed_tool_names:
-                            logger.warning(
-                                "mcp_tool_blocked_unknown_tool tool_name=%s argument_keys=%s",
+                            if tool_call.tool_name not in allowed_tool_names:
+                                logger.warning(
+                                    "mcp_tool_blocked_unknown_tool tool_name=%s argument_keys=%s",
+                                    tool_call.tool_name,
+                                    safe_argument_keys,
+                                )
+
+                                results.append(
+                                    ToolResult(
+                                        tool_name=tool_call.tool_name,
+                                        arguments=tool_call.arguments,
+                                        result="Tool was not found on the MCP server.",
+                                    )
+                                )
+                                continue
+
+                            logger.info(
+                                "mcp_tool_execution_started tool_name=%s argument_keys=%s",
                                 tool_call.tool_name,
                                 safe_argument_keys,
+                            )
+
+                            with app_function_span(
+                                name=f"mcp.call_tool.{tool_call.tool_name}",
+                                input_summary=(
+                                    f"tool_name={tool_call.tool_name}; "
+                                    f"argument_keys={safe_argument_keys}"
+                                ),
+                            ):
+                                result = await session.call_tool(
+                                    tool_call.tool_name,
+                                    tool_call.arguments,
+                                )
+
+                            logger.info(
+                                "mcp_tool_execution_completed tool_name=%s",
+                                tool_call.tool_name,
                             )
 
                             results.append(
                                 ToolResult(
                                     tool_name=tool_call.tool_name,
                                     arguments=tool_call.arguments,
-                                    result="Tool was not found on the MCP server.",
+                                    result=str(result.content),
                                 )
                             )
-                            continue
 
                         logger.info(
-                            "mcp_tool_execution_started tool_name=%s argument_keys=%s",
-                            tool_call.tool_name,
-                            safe_argument_keys,
+                            "mcp_tool_plan_execution_completed result_count=%s",
+                            len(results),
                         )
 
-                        result = await session.call_tool(
-                            tool_call.tool_name,
-                            tool_call.arguments,
-                        )
+                        return results
 
-                        logger.info(
-                            "mcp_tool_execution_completed tool_name=%s",
-                            tool_call.tool_name,
-                        )
-
-                        results.append(
-                            ToolResult(
-                                tool_name=tool_call.tool_name,
-                                arguments=tool_call.arguments,
-                                result=str(result.content),
-                            )
-                        )
-
-                    logger.info(
-                        "mcp_tool_plan_execution_completed result_count=%s",
-                        len(results),
-                    )
-
-                    return results
-
-        except Exception:
-            logger.exception("mcp_tool_plan_execution_failed")
-            raise
+            except Exception:
+                logger.exception("mcp_tool_plan_execution_failed")
+                raise
