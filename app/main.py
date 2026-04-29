@@ -2,7 +2,11 @@ import asyncio
 
 import streamlit as st
 
+from app.infrastructure.logging_config import configure_logging
 from app.services.support_assistant_service import SupportAssistantService
+
+configure_logging()
+
 
 class CustomerSupportMcpApplication:
     def __init__(self):
@@ -38,32 +42,42 @@ class CustomerSupportMcpApplication:
         )
 
         if st.button("Resolve Support Request"):
-            with st.spinner("Discovering MCP tools and resolving request..."):
-                response = asyncio.run(
-                    self.support_service.resolve_support_question(
-                        customer_id=customer_id,
-                        order_id=order_id,
-                        question=question,
+            try:
+                with st.spinner("Discovering MCP tools and resolving request..."):
+                    response = asyncio.run(
+                        self.support_service.resolve_support_question(
+                            customer_id=customer_id,
+                            order_id=order_id,
+                            question=question,
+                        )
                     )
+
+                st.subheader("Recommended Agent Response")
+                st.write(response.agent_response)
+
+                st.subheader("Dynamically Selected MCP Tools")
+                if response.selected_tools:
+                    for tool_name in response.selected_tools:
+                        st.write(f"- `{tool_name}`")
+                else:
+                    st.write("No tool selected.")
+
+                st.subheader("MCP Tool Results")
+                for tool_result in response.tool_results:
+                    with st.expander(tool_result.tool_name):
+                        st.write("Arguments")
+                        st.json(tool_result.arguments)
+                        st.write("Result")
+                        st.write(tool_result.result)
+
+            except ValueError as error:
+                st.warning(str(error))
+
+            except Exception:
+                st.error(
+                    "The support assistant could not complete this request. "
+                    "Please check the application logs for details."
                 )
-
-            st.subheader("Recommended Agent Response")
-            st.write(response.agent_response)
-
-            st.subheader("Dynamically Selected MCP Tools")
-            if response.selected_tools:
-                for tool_name in response.selected_tools:
-                    st.write(f"- `{tool_name}`")
-            else:
-                st.write("No tool selected.")
-
-            st.subheader("MCP Tool Results")
-            for tool_result in response.tool_results:
-                with st.expander(tool_result.tool_name):
-                    st.write("Arguments")
-                    st.json(tool_result.arguments)
-                    st.write("Result")
-                    st.write(tool_result.result)
 
 
 def main() -> None:
