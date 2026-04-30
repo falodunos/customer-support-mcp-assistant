@@ -37,11 +37,13 @@ class SupportAssistantService:
 
         with app_trace(
             workflow_name="customer_support_mcp_request",
+            group_id=f"support-assistant:{customer_id}:{order_id}",
             metadata={
                 "request_id": request_id,
+                "flow": "tool_discovery_to_planning_to_mcp_execution_to_final_response",
                 "customer_id": customer_id,
                 "order_id": order_id,
-                "question_length": str(len(question)),
+                "question_length": len(question),
             },
         ):
             try:

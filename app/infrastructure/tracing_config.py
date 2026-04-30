@@ -15,14 +15,33 @@ def tracing_enabled() -> bool:
     return os.getenv("OPENAI_TRACING_ENABLED", "true").lower() in {"true", "1", "yes"}
 
 
+def _stringify_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
+    if not metadata:
+        return {}
+
+    return {
+        str(key): str(value)
+        for key, value in metadata.items()
+        if value is not None
+    }
+
+
 @contextmanager
-def app_trace(workflow_name: str, metadata: dict[str, Any] | None = None) -> Iterator[None]:
+def app_trace(
+    workflow_name: str,
+    group_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> Iterator[None]:
     if not tracing_enabled() or trace is None:
         with nullcontext():
             yield
         return
 
-    with trace(workflow_name, metadata=metadata or {}):
+    with trace(
+        workflow_name=workflow_name,
+        group_id=group_id,
+        metadata=_stringify_metadata(metadata),
+    ):
         yield
 
 
@@ -63,5 +82,5 @@ def app_custom_span(name: str, data: dict[str, Any] | None = None) -> Iterator[N
             yield
         return
 
-    with custom_span(name=name, data=data or {}):
+    with custom_span(name=name, data=_stringify_metadata(data)):
         yield
